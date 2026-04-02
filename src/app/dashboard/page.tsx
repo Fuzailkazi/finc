@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState, useEffect, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import { 
   Wallet, 
   Search, 
@@ -9,7 +10,6 @@ import {
   X,
   Sparkles,
   LogOut,
-  ChevronRight,
   Activity,
   Loader2
 } from "lucide-react";
@@ -28,8 +28,10 @@ const categoryConfig: Record<string, { emoji: string, bg: string, text: string, 
 };
 
 export default function Dashboard() {
+  const [session, setSession] = useState<any>(null);
   const [expenses, setExpenses] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isInitializing, setIsInitializing] = useState(true);
   const [input, setInput] = useState("");
   const [status, setStatus] = useState<'idle' | 'analyzing' | 'confirming'>('idle');
   const [pendingExpense, setPendingExpense] = useState<any>(null);
@@ -37,17 +39,19 @@ export default function Dashboard() {
   const [removingIds, setRemovingIds] = useState<Set<string>>(new Set());
   const [activeFilter, setActiveFilter] = useState<'all' | 'april' | 'march'>('all');
   const [error, setError] = useState<string | null>(null);
+  const router = useRouter();
   
   // New states for Dual Mode & Insights
   const [isManual, setIsManual] = useState(false);
   const [insights, setInsights] = useState<{ insights: string[], tip: string } | null>(null);
   const [isAnalyzingInsights, setIsAnalyzingInsights] = useState(false);
 
-  const fetchExpenses = useCallback(async () => {
+  const fetchExpenses = useCallback(async (userId: string) => {
     try {
       const { data, error } = await supabase
         .from('expenses')
         .select('*')
+        .eq('user_id', userId)
         .order('expense_date', { ascending: false })
         .order('created_at', { ascending: false });
 
@@ -62,8 +66,26 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
-    fetchExpenses();
-  }, [fetchExpenses]);
+    const checkSession = async () => {
+      const { data: { session: currentSession } } = await supabase.auth.getSession();
+      
+      if (!currentSession) {
+        router.push("/");
+        return;
+      }
+
+      setSession(currentSession);
+      setIsInitializing(false);
+      fetchExpenses(currentSession.user.id);
+    };
+
+    checkSession();
+  }, [fetchExpenses, router]);
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    router.push("/");
+  };
 
   // Auto-dismiss error after 5 seconds
   useEffect(() => {
@@ -192,17 +214,24 @@ export default function Dashboard() {
   };
 
   const handleConfirm = async () => {
+    if (!session?.user?.id) return;
+    
     try {
+      const payload = {
+        ...pendingExpense,
+        user_id: session.user.id
+      };
+
       const { error } = await supabase
         .from('expenses')
-        .insert([pendingExpense]);
+        .insert([payload]);
 
       if (error) throw error;
       
       setStatus('idle');
       setPendingExpense(null);
       setIsEditing(false);
-      fetchExpenses(); // Refetch after insert
+      fetchExpenses(session.user.id); // Refetch after insert
     } catch (err: any) {
       setError(`Database Error: ${err.message}`);
     }
@@ -246,11 +275,23 @@ export default function Dashboard() {
           </div>
           <span className="font-unbounded font-black tracking-tight text-slate-800 uppercase text-sm">Expense Tracker</span>
         </div>
-        <button className="flex items-center gap-2 px-3 py-1.5 text-[11px] font-black uppercase tracking-widest text-slate-400 hover:text-rose-500 transition-colors">
+        <button 
+          onClick={handleLogout}
+          className="flex items-center gap-2 px-3 py-1.5 text-[11px] font-black uppercase tracking-widest text-slate-400 hover:text-rose-500 transition-colors"
+        >
           <LogOut className="w-4 h-4" />
           Logout
         </button>
       </header>
+
+      {isInitializing && (
+        <div className="fixed inset-0 bg-white z-[100] flex flex-col items-center justify-center gap-4">
+           <div className="w-12 h-12 bg-blue-600 rounded-xl flex items-center justify-center animate-bounce">
+              <Wallet className="text-white w-6 h-6" />
+           </div>
+           <p className="text-[12px] font-black text-slate-400 uppercase tracking-[0.2em] animate-pulse">Initializing Secure Session...</p>
+        </div>
+      )}
 
       <main className="max-w-[700px] mx-auto px-4 py-12">
         {/* INPUT BAR */}
