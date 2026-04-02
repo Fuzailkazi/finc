@@ -55,6 +55,7 @@ export default function Dashboard() {
   const [isEditing, setIsEditing] = useState(false);
   const [removingIds, setRemovingIds] = useState<Set<string>>(new Set());
   const [activeFilter, setActiveFilter] = useState<'all' | 'april' | 'march'>('all');
+  const [error, setError] = useState<string | null>(null);
 
   const filteredExpenses = useMemo(() => {
     if (activeFilter === 'all') return expenses;
@@ -83,23 +84,41 @@ export default function Dashboard() {
     };
   }, [filteredExpenses]);
 
-  const handleSubmit = (e?: React.FormEvent) => {
+  const handleSubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!input.trim()) return;
 
     setStatus('analyzing');
     
-    setTimeout(() => {
-      setPendingExpense({
-        id: Math.random().toString(36).substr(2, 9),
-        amount: 500,
-        category: 'food',
-        description: 'Dinner with friends',
-        expense_date: '2026-04-02',
-        raw_input: input,
+    try {
+      const response = await fetch('/api/parse-expense', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input }),
       });
-      setStatus('confirming');
-    }, 1500);
+      
+      const result = await response.json();
+      
+      if (result.success) {
+        setPendingExpense({
+          id: Math.random().toString(36).substr(2, 9),
+          amount: result.data.amount || 0,
+          category: result.data.category || 'other',
+          description: result.data.description || 'New expense',
+          expense_date: result.data.date || new Date().toISOString().split('T')[0],
+          raw_input: input,
+        });
+        setStatus('confirming');
+        setError(null);
+      } else {
+        setError("Couldn't understand that. Try rephrasing.");
+        setStatus('idle');
+      }
+    } catch (error) {
+      console.error("Fetch error:", error);
+      setError("Connection error. Please try again.");
+      setStatus('idle');
+    }
   };
 
   const handleConfirm = () => {
@@ -185,18 +204,29 @@ export default function Dashboard() {
               <h1 className="text-xl font-unbounded font-black tracking-tight text-slate-800">My Financial Hub</h1>
            </div>
            
-           <form onSubmit={handleSubmit} className="flex items-center gap-4 flex-1 max-w-[500px] mx-10">
-              <div className="relative flex-1">
-                <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300 w-4 h-4" />
-                <input 
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  disabled={status !== 'idle'}
-                  className="w-full pl-11 pr-4 py-3 bg-slate-50 border border-[#E5E7EB] rounded-[12px] text-[13px] font-medium focus:outline-none focus:ring-1 focus:ring-[#2563EB]/40 transition-all placeholder:text-slate-400"
-                  placeholder="Quick add: 'spent 50 for coffee'..."
-                />
-              </div>
-           </form>
+           <form onSubmit={handleSubmit} className="flex-1 max-w-[500px] mx-10 relative">
+               <div className="flex items-center gap-4">
+                  <div className="relative flex-1">
+                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300 w-4 h-4" />
+                    <input 
+                      value={input}
+                      onChange={(e) => {
+                        setInput(e.target.value);
+                        if (error) setError(null);
+                      }}
+                      disabled={status !== 'idle'}
+                      className="w-full pl-11 pr-4 py-3 bg-slate-50 border border-[#E5E7EB] rounded-[12px] text-[13px] font-medium focus:outline-none focus:ring-1 focus:ring-[#2563EB]/40 transition-all placeholder:text-slate-400"
+                      placeholder="Quick add: 'spent 50 for coffee'..."
+                    />
+                  </div>
+               </div>
+               {error && (
+                 <div className="absolute top-[calc(100%+8px)] left-0 right-0 bg-rose-50 border border-rose-100 text-rose-600 text-[11px] font-bold px-4 py-2 rounded-[8px] flex items-center gap-2 animate-fade-in z-50">
+                    <X className="w-3 h-3 cursor-pointer" onClick={() => setError(null)} />
+                    {error}
+                 </div>
+               )}
+            </form>
            
            <div className="flex items-center gap-3">
              <button className="p-3 text-slate-400 hover:text-[#2563EB] transition-colors bg-white border border-slate-100 rounded-[12px] shadow-sm relative">
