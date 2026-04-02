@@ -1,26 +1,40 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #F9FAFB; /* Neutral light gray/blue background from ArmoriQ */
+  --foreground: #111827; /* Dark navy for better "Expert" readability */
+  --card-bg: #FFFFFF;
+  --accent: #2563EB; /* Precision Royal Blue from the reference image */
+  --accent-light: #EFF6FF; /* Soft blue tint for active states */
+  --border: #E5E7EB;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-brand: var(--accent);
+  --color-brand-light: var(--accent-light);
+  --color-border-subtle: var(--border);
+  
+  --font-unbounded: var(--font-unbounded), sans-serif;
+  --font-sunflower: var(--font-sunflower), sans-serif;
+  
+  --radius-pro: 8px; /* Slightly tighter radius to match the screenshot better */
+  --radius-pro-lg: 12px;
+  
+  --shadow-pro: 0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 1px 2px -1px rgba(0, 0, 0, 0.05); /* Softer, precise shadows */
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
+/* Global Polish */
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sunflower), sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background: var(--accent);
+  color: white;
 }
