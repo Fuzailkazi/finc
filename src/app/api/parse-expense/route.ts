@@ -1,25 +1,35 @@
 import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
-// Using Gemini 2.0 Flash as requested
-const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-
 export async function POST(req: NextRequest) {
+  const isKeyAvailable = !!process.env.GEMINI_API_KEY;
+  console.log(`[API] GEMINI_API_KEY available: ${isKeyAvailable}`);
+
+  if (!isKeyAvailable) {
+    return NextResponse.json(
+      { success: false, error: "GEMINI_API_KEY is not configured in environment variables." },
+      { status: 500 }
+    );
+  }
+
   try {
     const { input } = await req.json();
+    const trimmedInput = input?.trim();
+    
+    console.log(`[API] Incoming input: "${trimmedInput}"`);
 
-    if (!input) {
+    if (!trimmedInput) {
       return NextResponse.json(
-        { success: false, error: "No input provided" },
+        { success: false, error: "No input text provided." },
         { status: 400 }
       );
     }
 
     const today = new Date().toISOString().split('T')[0];
+    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
     const prompt = `Parse this expense and return ONLY valid JSON with no markdown formatting:
-Input: ${input}
+Input: ${trimmedInput}
 
 Return exactly this structure:
 {
@@ -36,28 +46,45 @@ Rules:
 - Keep description under 6 words
 - If date is mentioned as yesterday/last week etc, calculate the actual date relative to ${today}`;
 
-    const result = await model.generateContent(prompt);
+    // Sequential fallback: 2.0-flash -> 1.5-flash
+    const modelsToTry = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-latest"];
+    let result = null;
+    let successfulModel = "";
+
+    for (const modelName of modelsToTry) {
+      try {
+        console.log(`[API] Attempting model: ${modelName}`);
+        const model = genAI.getGenerativeModel({ model: modelName });
+        result = await model.generateContent(prompt);
+        successfulModel = modelName;
+        break; // Success!
+      } catch (modelError: any) {
+        console.warn(`[API] Model ${modelName} failed: ${modelError.message}`);
+      }
+    }
+
+    if (!result) {
+      console.error("[API] All models failed. Returning success: false for manual fallback.");
+      return NextResponse.json({ success: false });
+    }
+
+    console.log(`[API] Successfully parsed using: ${successfulModel}`);
     const response = await result.response;
     const text = response.text();
     
-    // Strip any markdown code fences if they exist
-    const cleanJson = text.replace(/```json|```/g, "").trim();
+    // Robust JSON extraction
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    const cleanJson = jsonMatch ? jsonMatch[0] : text.replace(/```json|```/g, "").trim();
     
     try {
       const parsedResult = JSON.parse(cleanJson);
       return NextResponse.json({ success: true, data: parsedResult });
-    } catch (parseError) {
-      console.error("JSON Parse Error:", parseError, "Raw Text:", text);
-      return NextResponse.json(
-        { success: false, error: "Failed to parse AI response as JSON" },
-        { status: 500 }
-      );
+    } catch (parseError: any) {
+      console.error(`[API] JSON Parse Error: ${parseError.message}`, { rawText: text });
+      return NextResponse.json({ success: false }); // Silently fail to manual mode
     }
   } catch (error: any) {
-    console.error("Gemini API Error:", error);
-    return NextResponse.json(
-      { success: false, error: error.message || "Internal server error" },
-      { status: 500 }
-    );
+    console.error(`[API] Fatal Error: ${error.message}`, { stack: error.stack });
+    return NextResponse.json({ success: false }); // Silently fail to manual mode
   }
 }

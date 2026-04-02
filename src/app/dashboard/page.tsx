@@ -1,39 +1,19 @@
 "use client";
 
-import { useMemo, useState, useEffect } from "react";
-import Link from "next/link";
+import { useMemo, useState, useEffect, useCallback } from "react";
 import { 
-  LayoutDashboard, 
   Wallet, 
   Search, 
-  Bell, 
-  Plus, 
-  ArrowUpRight, 
   Trash2,
-  Calendar,
-  ChevronRight,
-  TrendingDown,
-  Activity,
-  LogOut,
-  Settings,
   Check,
-  Edit2,
   X,
   Sparkles,
-  Target,
-  Banknote,
-  PiggyBank,
-  CreditCard
+  LogOut,
+  ChevronRight,
+  Activity,
+  Loader2
 } from "lucide-react";
-
-// Initial mock data
-const initialExpenses = [
-  { id: '1', amount: 500, category: 'food', description: 'Dinner with friends', expense_date: '2026-04-02', raw_input: 'spent 500 on dinner with friends' },
-  { id: '2', amount: 300, category: 'transport', description: 'Uber to home', expense_date: '2026-04-02', raw_input: '300 on uber' },
-  { id: '3', amount: 1200, category: 'shopping', description: 'New sneakers', expense_date: '2026-04-01', raw_input: 'bought sneakers for 1200' },
-  { id: '4', amount: 150, category: 'food', description: 'Coffee at Starbucks', expense_date: '2026-04-01', raw_input: '150 on coffee' },
-  { id: '5', amount: 2000, category: 'bills', description: 'Electricity Bill', expense_date: '2026-03-31', raw_input: 'electricity of 2000' },
-];
+import { supabase } from "@/lib/supabase";
 
 const categoryConfig: Record<string, { emoji: string, bg: string, text: string, border: string, dot: string }> = {
   food: { emoji: "🍔", bg: "bg-orange-50", text: "text-orange-700", border: "border-orange-100", dot: "bg-orange-500" },
@@ -48,7 +28,8 @@ const categoryConfig: Record<string, { emoji: string, bg: string, text: string, 
 };
 
 export default function Dashboard() {
-  const [expenses, setExpenses] = useState(initialExpenses);
+  const [expenses, setExpenses] = useState<any[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
   const [input, setInput] = useState("");
   const [status, setStatus] = useState<'idle' | 'analyzing' | 'confirming'>('idle');
   const [pendingExpense, setPendingExpense] = useState<any>(null);
@@ -56,6 +37,41 @@ export default function Dashboard() {
   const [removingIds, setRemovingIds] = useState<Set<string>>(new Set());
   const [activeFilter, setActiveFilter] = useState<'all' | 'april' | 'march'>('all');
   const [error, setError] = useState<string | null>(null);
+  
+  // New states for Dual Mode & Insights
+  const [isManual, setIsManual] = useState(false);
+  const [insights, setInsights] = useState<{ insights: string[], tip: string } | null>(null);
+  const [isAnalyzingInsights, setIsAnalyzingInsights] = useState(false);
+
+  const fetchExpenses = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('expenses')
+        .select('*')
+        .order('expense_date', { ascending: false })
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+      setExpenses(data || []);
+    } catch (err: any) {
+      console.error("Fetch Error:", err);
+      setError("Failed to load expenses.");
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchExpenses();
+  }, [fetchExpenses]);
+
+  // Auto-dismiss error after 5 seconds
+  useEffect(() => {
+    if (error) {
+       const timer = setTimeout(() => setError(null), 5000);
+       return () => clearTimeout(timer);
+    }
+  }, [error]);
 
   const filteredExpenses = useMemo(() => {
     if (activeFilter === 'all') return expenses;
@@ -67,11 +83,21 @@ export default function Dashboard() {
     });
   }, [expenses, activeFilter]);
 
+  const groupedExpenses = useMemo(() => {
+    const groups: Record<string, any[]> = {};
+    filteredExpenses.forEach(exp => {
+      const date = exp.expense_date;
+      if (!groups[date]) groups[date] = [];
+      groups[date].push(exp);
+    });
+    return Object.entries(groups).sort((a, b) => b[0].localeCompare(a[0]));
+  }, [filteredExpenses]);
+
   const stats = useMemo(() => {
-    const total = filteredExpenses.reduce((sum, exp) => sum + exp.amount, 0);
+    const total = filteredExpenses.reduce((sum, exp) => sum + Number(exp.amount), 0);
     const categoryTotals: Record<string, number> = {};
     filteredExpenses.forEach(exp => {
-      categoryTotals[exp.category] = (categoryTotals[exp.category] || 0) + exp.amount;
+      categoryTotals[exp.category] = (categoryTotals[exp.category] || 0) + Number(exp.amount);
     });
     const sortedCategories = Object.entries(categoryTotals).sort((a, b) => b[1] - a[1]);
     const topCategory = sortedCategories[0]?.[0] || "None";
@@ -79,422 +105,450 @@ export default function Dashboard() {
     return {
       total: `₹${total.toLocaleString()}`,
       topCategory: topCategory.charAt(0).toUpperCase() + topCategory.slice(1),
-      transactions: filteredExpenses.length,
-      breakdown: sortedCategories.slice(0, 4),
+      breakdown: sortedCategories.slice(0, 5),
     };
   }, [filteredExpenses]);
 
   const handleSubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!input.trim()) return;
-
-    setStatus('analyzing');
     
+    const trimmedInput = input.trim();
+    if (!trimmedInput) return;
+
+    setInput("");
+    setStatus('analyzing');
+    setError(null);
+    setIsManual(false); // Reset fallback state
+    
+    // Create a 5-second timeout promise
+    let timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error("AL_TIMEOUT")), 5000)
+    );
+
     try {
-      const response = await fetch('/api/parse-expense', {
+      // Race the API call against the 5s timeout
+      const parsePromise = fetch('/api/parse-expense', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ input }),
-      });
-      
-      const result = await response.json();
+        body: JSON.stringify({ input: trimmedInput }),
+      }).then(res => res.json());
+
+      const result = await Promise.race([parsePromise, timeoutPromise]) as any;
       
       if (result.success) {
         setPendingExpense({
-          id: Math.random().toString(36).substr(2, 9),
           amount: result.data.amount || 0,
           category: result.data.category || 'other',
-          description: result.data.description || 'New expense',
+          description: result.data.description || trimmedInput,
           expense_date: result.data.date || new Date().toISOString().split('T')[0],
-          raw_input: input,
+          raw_input: trimmedInput,
         });
-        setStatus('confirming');
-        setError(null);
+        setIsManual(false);
       } else {
-        setError("Couldn't understand that. Try rephrasing.");
-        setStatus('idle');
+        // AI failed quietly, fallback to manual
+        setPendingExpense({
+          amount: '',
+          category: 'other',
+          description: trimmedInput,
+          expense_date: new Date().toISOString().split('T')[0],
+          raw_input: trimmedInput,
+        });
+        setIsManual(true);
       }
-    } catch (error) {
-      console.error("Fetch error:", error);
-      setError("Connection error. Please try again.");
-      setStatus('idle');
+      setStatus('confirming');
+    } catch (err: any) {
+      console.warn("AI Processing Cutoff:", err.message);
+      // Timeout or Fetch error: Switch to Manual mode silently
+      setPendingExpense({
+        amount: '',
+        category: 'other',
+        description: trimmedInput,
+        expense_date: new Date().toISOString().split('T')[0],
+        raw_input: trimmedInput,
+      });
+      setIsManual(true);
+      setStatus('confirming');
     }
   };
 
-  const handleConfirm = () => {
-    setExpenses([pendingExpense, ...expenses]);
-    setStatus('idle');
-    setPendingExpense(null);
-    setInput("");
-    setIsEditing(false);
+  const analyzeSpending = async () => {
+    if (expenses.length === 0) return;
+    setIsAnalyzingInsights(true);
+    try {
+      const response = await fetch('/api/analyze-spending', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expenses: expenses.slice(0, 50) }), // Send recent 50
+      });
+      const result = await response.json();
+      if (result.success) {
+        setInsights(result.data);
+      }
+    } catch (err) {
+      console.error("Insights generation failed");
+    } finally {
+      setIsAnalyzingInsights(false);
+    }
   };
 
-  const handleDelete = (id: string) => {
+  const handleConfirm = async () => {
+    try {
+      const { error } = await supabase
+        .from('expenses')
+        .insert([pendingExpense]);
+
+      if (error) throw error;
+      
+      setStatus('idle');
+      setPendingExpense(null);
+      setIsEditing(false);
+      fetchExpenses(); // Refetch after insert
+    } catch (err: any) {
+      setError(`Database Error: ${err.message}`);
+    }
+  };
+
+  const handleDelete = async (id: string) => {
     setRemovingIds(prev => new Set(prev).add(id));
-    setTimeout(() => {
-      setExpenses(prev => prev.filter(e => e.id !== id));
+    
+    try {
+      const { error } = await supabase
+        .from('expenses')
+        .delete()
+        .eq('id', id);
+
+      if (error) throw error;
+      
+      setTimeout(() => {
+         setExpenses(prev => prev.filter(e => e.id !== id));
+         setRemovingIds(prev => {
+            const next = new Set(prev);
+            next.delete(id);
+            return next;
+         });
+      }, 400); 
+    } catch (err: any) {
+      setError(`Delete Failed: ${err.message}`);
       setRemovingIds(prev => {
         const next = new Set(prev);
         next.delete(id);
         return next;
       });
-    }, 400); // Animation duration
+    }
   };
 
   return (
-    <div className="flex h-screen bg-[#F9FAFB] text-[#111827] font-sunflower overflow-hidden">
-      {/* Sidebar - Personal Focus */}
-      <aside className="w-[260px] hidden md:flex flex-col border-r border-[#E5E7EB] bg-white">
-        <div className="px-6 pt-2 pb-6">
-          <div className="flex items-center gap-3 mb-6 px-2 cursor-pointer transition-transform active:scale-95">
-            <div className="w-8 h-8 bg-[#2563EB] rounded-[8px] flex items-center justify-center">
-              <Wallet className="text-white w-5 h-5" />
-            </div>
-            <span className="text-xl font-unbounded font-black tracking-tighter text-slate-800 uppercase">FINAI</span>
+    <div className="min-h-screen bg-[#FDFDFF] text-slate-900 font-sunflower selection:bg-blue-100">
+      <header className="px-6 py-4 flex items-center justify-between border-b border-slate-100 bg-white/80 backdrop-blur-md sticky top-0 z-50">
+        <div className="flex items-center gap-2.5">
+          <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center shadow-lg shadow-blue-200">
+            <Wallet className="text-white w-4 h-4" />
           </div>
-
-          <nav className="space-y-1 font-medium tracking-tight">
-            {[
-              { icon: LayoutDashboard, label: "My Overview", active: true },
-              { icon: Activity, label: "Spend Timeline" },
-              { icon: Target, label: "Saving Goals" },
-              { icon: Banknote, label: "Subscription Tracker" },
-              { icon: CreditCard, label: "My Accounts" },
-              { icon: PiggyBank, label: "Budget Planner" },
-              { icon: Settings, label: "Preferences" },
-            ].map((item, i) => (
-              <button 
-                key={i} 
-                className={`flex items-center w-full px-3 py-2.5 rounded-[10px] text-[13px] transition-all group ${
-                  item.active 
-                  ? "bg-slate-50 text-[#2563EB] font-bold" 
-                  : "text-slate-500 hover:bg-slate-50 hover:text-slate-800"
-                }`}
-              >
-                <item.icon className="w-[18px] h-[18px] mr-3 opacity-40 group-hover:opacity-80" />
-                {item.label}
-              </button>
-            ))}
-          </nav>
+          <span className="font-unbounded font-black tracking-tight text-slate-800 uppercase text-sm">Expense Tracker</span>
         </div>
+        <button className="flex items-center gap-2 px-3 py-1.5 text-[11px] font-black uppercase tracking-widest text-slate-400 hover:text-rose-500 transition-colors">
+          <LogOut className="w-4 h-4" />
+          Logout
+        </button>
+      </header>
 
-        {/* Individual Profile */}
-        <div className="mt-auto p-4 border-t border-[#E5E7EB]">
-           <div className="p-3 bg-slate-50 rounded-[12px] border border-slate-100 flex flex-col gap-2">
-              <div className="flex items-center gap-3">
-                 <div className="w-8 h-8 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-[10px] font-black">FK</div>
-                 <div className="min-w-0">
-                    <p className="text-[12px] font-bold truncate">Fuzail Kazi</p>
-                    <p className="text-[9px] text-[#2563EB] font-black uppercase tracking-widest">Personal Pro</p>
+      <main className="max-w-[700px] mx-auto px-4 py-12">
+        {/* INPUT BAR */}
+        <section className="mb-12">
+          <form onSubmit={handleSubmit} className="relative">
+            <div className={`p-4 bg-white rounded-3xl border ${error ? 'border-rose-200 shadow-rose-100' : 'border-slate-100 shadow-xl shadow-slate-200/50'} transition-all flex items-center gap-4`}>
+                <div className="flex-1 relative">
+                  <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300 w-5 h-5" />
+                  <input 
+                    value={input}
+                    onChange={(e) => {
+                      setInput(e.target.value);
+                      if (error) setError(null);
+                    }}
+                    disabled={status !== 'idle'}
+                    className="w-full pl-12 pr-4 py-4 text-[16px] font-medium bg-transparent focus:outline-none placeholder:text-slate-300"
+                    placeholder="spent 500 on dinner with team..."
+                  />
+                </div>
+                <button 
+                  disabled={status !== 'idle' || !input.trim()}
+                  className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-100 disabled:text-slate-300 text-white font-black uppercase text-[11px] tracking-[0.2em] px-8 py-4 rounded-2xl transition-all shadow-lg shadow-blue-600/20 active:scale-95"
+                >
+                  {status === 'analyzing' ? <Loader2 className="w-5 h-5 animate-spin" /> : "Submit"}
+                </button>
+            </div>
+            {error && (
+              <div className="absolute top-full mt-4 left-0 right-0 bg-rose-600 text-white text-[12px] font-black px-6 py-4 rounded-2xl animate-fade-in flex items-center gap-3 shadow-xl z-[100]">
+                 <div className="bg-white/20 p-1 rounded-lg">
+                    <X className="w-4 h-4 cursor-pointer" onClick={() => setError(null)} />
                  </div>
-              </div>
-           </div>
-           <button className="flex items-center gap-2.5 w-full px-3 py-4 text-[12px] font-bold text-slate-400 hover:text-slate-800 transition-colors mt-2">
-              <LogOut className="w-4 h-4 opacity-40" />
-              Sign out
-           </button>
-        </div>
-      </aside>
-
-      {/* Main Content */}
-      <main className="flex-1 overflow-y-auto custom-scrollbar relative">
-        <div className="sticky top-0 z-30 bg-white/80 backdrop-blur-md border-b border-[#E5E7EB] px-8 py-2.5 flex items-center justify-between gap-8">
-           <div className="flex flex-col">
-              <span className="text-[9px] font-black uppercase tracking-[0.2em] text-[#2563EB]/40">PERSONAL LEDGER</span>
-              <h1 className="text-xl font-unbounded font-black tracking-tight text-slate-800">My Financial Hub</h1>
-           </div>
-           
-           <form onSubmit={handleSubmit} className="flex-1 max-w-[500px] mx-10 relative">
-               <div className="flex items-center gap-4">
-                  <div className="relative flex-1">
-                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300 w-4 h-4" />
-                    <input 
-                      value={input}
-                      onChange={(e) => {
-                        setInput(e.target.value);
-                        if (error) setError(null);
-                      }}
-                      disabled={status !== 'idle'}
-                      className="w-full pl-11 pr-4 py-3 bg-slate-50 border border-[#E5E7EB] rounded-[12px] text-[13px] font-medium focus:outline-none focus:ring-1 focus:ring-[#2563EB]/40 transition-all placeholder:text-slate-400"
-                      placeholder="Quick add: 'spent 50 for coffee'..."
-                    />
-                  </div>
-               </div>
-               {error && (
-                 <div className="absolute top-[calc(100%+8px)] left-0 right-0 bg-rose-50 border border-rose-100 text-rose-600 text-[11px] font-bold px-4 py-2 rounded-[8px] flex items-center gap-2 animate-fade-in z-50">
-                    <X className="w-3 h-3 cursor-pointer" onClick={() => setError(null)} />
+                 <div className="flex-1">
+                    <p className="uppercase tracking-widest text-[9px] opacity-70 mb-0.5">System Alert</p>
                     {error}
                  </div>
-               )}
-            </form>
-           
-           <div className="flex items-center gap-3">
-             <button className="p-3 text-slate-400 hover:text-[#2563EB] transition-colors bg-white border border-slate-100 rounded-[12px] shadow-sm relative">
-               <Bell className="w-[18px] h-[18px]" />
-               <span className="absolute top-3 right-3 w-1.5 h-1.5 bg-rose-500 rounded-full border border-white"></span>
-             </button>
-           </div>
+              </div>
+            )}
+          </form>
+        </section>
+
+        {/* AI CONFIRMATION CARD */}
+        <div className={`transition-all duration-700 overflow-hidden ${status === 'idle' ? 'max-h-0 opacity-0' : 'max-h-[500px] opacity-100 mb-12'}`}>
+           {status === 'analyzing' && (
+              <div className="bg-white border-2 border-dashed border-blue-100 rounded-3xl p-10 flex flex-col items-center justify-center text-center animate-pulse gap-4">
+                 <Sparkles className="w-10 h-10 text-blue-600 animate-spin-slow" />
+                 <div>
+                    <h4 className="text-[15px] font-bold text-slate-800">Understanding your expense...</h4>
+                    <p className="text-[12px] text-slate-400 font-medium">Analyzing patterns via Gemini 2.0 Flash</p>
+                 </div>
+              </div>
+           )}
+
+           {status === 'confirming' && pendingExpense && (
+              <div className="bg-white border-2 border-blue-600 rounded-3xl p-8 shadow-2xl relative animate-fade-in-up">
+                 <div className="mb-8 flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-6 h-6 ${isManual ? 'bg-amber-100 text-amber-600' : 'bg-emerald-100 text-emerald-600'} rounded-full flex items-center justify-center`}>
+                        {isManual ? <Search className="w-3.5 h-3.5" /> : <Check className="w-3.5 h-3.5" />}
+                      </div>
+                      <h4 className={`text-[11px] font-black uppercase tracking-widest ${isManual ? 'text-amber-600' : 'text-blue-600'}`}>
+                        {isManual ? "Manual Form" : "✨ AI Assisted"}
+                      </h4>
+                    </div>
+                    {isManual && <p className="text-[10px] text-slate-400 font-bold uppercase tracking-tight">AI was slow/failed</p>}
+                 </div>
+
+                 <div className="grid grid-cols-2 gap-6 mb-8">
+                    <div className="col-span-1">
+                       <label className="text-[9px] font-black uppercase text-slate-400 mb-1.5 block tracking-widest">Amount (₹)</label>
+                       <input 
+                         className="w-full px-5 py-4 bg-slate-50 border border-slate-100 focus:border-blue-500 focus:bg-white transition-all rounded-2xl text-[18px] font-unbounded font-black text-slate-800" 
+                         value={pendingExpense.amount} 
+                         placeholder="0"
+                         onChange={(e) => setPendingExpense({...pendingExpense, amount: e.target.value})} 
+                         type="number" 
+                       />
+                    </div>
+                    <div className="col-span-1">
+                       <label className="text-[9px] font-black uppercase text-slate-400 mb-1.5 block tracking-widest">Category</label>
+                       <select 
+                         className="w-full px-5 py-[18px] bg-slate-50 border border-slate-100 focus:border-blue-500 focus:bg-white transition-all rounded-2xl text-[14px] font-black uppercase tracking-tight appearance-none" 
+                         value={pendingExpense.category} 
+                         onChange={(e) => setPendingExpense({...pendingExpense, category: e.target.value})}
+                       >
+                          {Object.keys(categoryConfig).map(cat => (
+                            <option key={cat} value={cat}>{categoryConfig[cat].emoji} {cat.toUpperCase()}</option>
+                          ))}
+                       </select>
+                    </div>
+                    <div className="col-span-2">
+                       <label className="text-[9px] font-black uppercase text-slate-400 mb-1.5 block tracking-widest">Description</label>
+                       <input 
+                         className="w-full px-5 py-4 bg-slate-50 border border-slate-100 focus:border-blue-500 focus:bg-white transition-all rounded-2xl text-[14px] font-bold text-slate-600" 
+                         value={pendingExpense.description} 
+                         onChange={(e) => setPendingExpense({...pendingExpense, description: e.target.value})} 
+                         placeholder="What was this for?"
+                       />
+                    </div>
+                    <div className="col-span-2">
+                       <label className="text-[9px] font-black uppercase text-slate-400 mb-1.5 block tracking-widest">Date</label>
+                       <input 
+                         type="date"
+                         className="w-full px-5 py-4 bg-slate-50 border border-slate-100 focus:border-blue-500 focus:bg-white transition-all rounded-2xl text-[14px] font-black" 
+                         value={pendingExpense.expense_date} 
+                         onChange={(e) => setPendingExpense({...pendingExpense, expense_date: e.target.value})} 
+                       />
+                    </div>
+                 </div>
+
+                 <div className="flex items-center gap-4">
+                    <button 
+                      onClick={handleConfirm} 
+                      disabled={!pendingExpense.amount || !pendingExpense.category}
+                      className="flex-[2] bg-blue-600 hover:bg-blue-700 disabled:bg-slate-100 disabled:text-slate-300 text-white font-black uppercase text-[11px] tracking-[0.2em] py-5 rounded-2xl shadow-xl shadow-blue-600/20 transition-all active:scale-95 flex items-center justify-center gap-3"
+                    >
+                       <Check className="w-4 h-4" /> Save Expense
+                    </button>
+                    <button 
+                      onClick={() => { setStatus('idle'); setPendingExpense(null); }} 
+                      className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-600 font-black uppercase text-[11px] tracking-widest py-5 rounded-2xl transition-all flex items-center justify-center gap-2"
+                    >
+                       Cancel
+                    </button>
+                 </div>
+              </div>
+           )}
         </div>
 
-        <div className="px-8 pt-6 pb-8 lg:px-12 lg:pt-8 lg:pb-12 max-w-[1300px]">
-          {/* Confirmation Flow */}
-          <div className={`transition-all duration-500 overflow-hidden ${status === 'idle' ? 'max-h-0 opacity-0 mb-0' : 'max-h-[350px] opacity-100 mb-12'}`}>
-             {status === 'analyzing' && (
-                <div className="bg-white border border-[#E5E7EB] rounded-[20px] p-8 shadow-xl animate-pulse flex items-center gap-6">
-                   <div className="w-14 h-14 bg-blue-50 rounded-full flex items-center justify-center">
-                      <Sparkles className="w-6 h-6 text-[#2563EB] animate-spin-slow" />
-                   </div>
-                   <div>
-                      <h4 className="text-[14px] font-bold text-slate-800">Understanding your expense...</h4>
-                      <p className="text-[12px] text-slate-400 font-medium">FinAI is parsing your natural language input.</p>
-                   </div>
-                </div>
-             )}
+        {/* STAT CARDS */}
+        <section className="grid grid-cols-2 gap-4 mb-10">
+           <div className="bg-white p-6 rounded-3xl border border-slate-100 shadow-sm flex flex-col justify-between">
+              <div>
+                 <p className="text-[9px] font-black uppercase text-slate-400 mb-1">This Month</p>
+                 <h3 className="text-2xl font-unbounded font-black text-blue-600 tracking-tighter">
+                   {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : stats.total}
+                 </h3>
+              </div>
+              <div className="mt-4 flex gap-1.5">
+                 {stats.breakdown.map(([cat]) => (
+                   <div key={cat} className={`w-2 h-2 rounded-full ${categoryConfig[cat]?.dot || 'bg-slate-200'}`} title={cat} />
+                 ))}
+              </div>
+           </div>
+           <div className="bg-white p-6 rounded-3xl border border-slate-100 shadow-sm">
+              <p className="text-[9px] font-black uppercase text-slate-400 mb-1">Top Category</p>
+              <div className="flex items-center gap-3">
+                 {isLoading ? (
+                    <Loader2 className="w-5 h-5 animate-spin text-slate-200" />
+                 ) : (
+                    <>
+                      <span className="text-2xl">{categoryConfig[stats.topCategory.toLowerCase()]?.emoji || '📌'}</span>
+                      <h3 className="text-xl font-unbounded font-black text-slate-800 tracking-tighter uppercase">{stats.topCategory}</h3>
+                    </>
+                 )}
+              </div>
+           </div>
+        </section>
 
-             {status === 'confirming' && pendingExpense && (
-                <div className="bg-white border-2 border-[#2563EB] rounded-[20px] p-8 shadow-2xl relative animate-fade-in-up">
-                   <div className="flex flex-col md:flex-row md:items-center justify-between mb-8 gap-6">
-                      <div className="flex items-center gap-4">
-                         <div className="w-12 h-12 bg-emerald-50 text-emerald-600 rounded-full flex items-center justify-center">
-                            <Check className="w-6 h-6" />
-                         </div>
-                         <div>
-                            <h4 className="text-[15px] font-unbounded font-black tracking-tight text-slate-800 uppercase">Verification Required</h4>
-                            <p className="text-[12px] text-slate-400 font-bold">Transaction Date: Today</p>
-                         </div>
-                      </div>
-                      <div className="flex items-center gap-3">
-                         <button onClick={() => setIsEditing(!isEditing)} className="flex items-center gap-2 px-6 py-2.5 bg-slate-100 hover:bg-slate-200 rounded-[10px] text-[11px] font-black uppercase text-slate-600 transition-colors">
-                            {isEditing ? "Cancel" : "Edit"}
-                         </button>
-                         <button onClick={handleConfirm} className="flex items-center gap-2 px-10 py-2.5 bg-emerald-500 hover:bg-emerald-600 text-white rounded-[10px] text-[11px] font-black uppercase tracking-widest transition-all shadow-lg active:scale-95">
-                            Confirm
-                         </button>
-                      </div>
-                   </div>
-
-                   {isEditing ? (
-                      <form className="grid grid-cols-1 md:grid-cols-4 gap-6 p-6 bg-slate-50 rounded-[16px] border border-slate-100">
-                         <div className="space-y-1.5">
-                            <label className="text-[9px] font-black uppercase tracking-widest text-[#2563EB]">Amount</label>
-                            <input className="w-full px-4 py-2.5 bg-white border border-slate-200 rounded-[10px] text-[14px] font-bold outline-none ring-blue-500/20 focus:ring-4" value={pendingExpense.amount} onChange={(e) => setPendingExpense({...pendingExpense, amount: Number(e.target.value)})} type="number" />
-                         </div>
-                         <div className="space-y-1.5">
-                            <label className="text-[9px] font-black uppercase tracking-widest text-[#2563EB]">Category</label>
-                            <select className="w-full px-4 py-2.5 bg-white border border-slate-200 rounded-[10px] text-[14px] font-bold outline-none ring-blue-500/20 focus:ring-4" value={pendingExpense.category} onChange={(e) => setPendingExpense({...pendingExpense, category: e.target.value})}>
-                               {Object.keys(categoryConfig).map(cat => <option key={cat} value={cat}>{cat}</option>)}
-                            </select>
-                         </div>
-                         <div className="space-y-1.5 md:col-span-2">
-                            <label className="text-[9px] font-black uppercase tracking-widest text-[#2563EB]">What did you buy?</label>
-                            <input className="w-full px-4 py-2.5 bg-white border border-slate-200 rounded-[10px] text-[14px] font-bold outline-none ring-blue-500/20 focus:ring-4" value={pendingExpense.description} onChange={(e) => setPendingExpense({...pendingExpense, description: e.target.value})} />
-                         </div>
-                      </form>
-                   ) : (
-                      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                         <div className="p-5 bg-slate-50 rounded-[16px] border border-slate-100">
-                            <p className="text-[9px] font-black uppercase tracking-widest text-slate-400 mb-2">My Spend</p>
-                            <p className="text-2xl font-unbounded font-black text-[#2563EB]">₹{pendingExpense.amount.toLocaleString()}</p>
-                         </div>
-                         <div className="p-5 bg-slate-50 rounded-[16px] border border-slate-200/50">
-                            <p className="text-[9px] font-black uppercase tracking-widest text-slate-400 mb-2">Category Map</p>
-                            <div className="flex items-center gap-3">
-                               <span className="text-2xl">{categoryConfig[pendingExpense.category]?.emoji}</span>
-                               <span className="text-[14px] font-black text-slate-800 uppercase tracking-tight">{pendingExpense.category}</span>
-                            </div>
-                         </div>
-                         <div className="p-5 bg-slate-50 rounded-[16px] border border-slate-100">
-                            <p className="text-[9px] font-black uppercase tracking-widest text-slate-400 mb-2">My Description</p>
-                            <p className="text-[14px] font-bold text-slate-600 line-clamp-2 italic">"{pendingExpense.description}"</p>
-                         </div>
-                      </div>
-                   )}
-                </div>
-             )}
+        {/* EXPENSE LIST */}
+        <section>
+          <div className="flex items-center justify-between mb-8">
+             <h2 className="text-[12px] font-black uppercase tracking-widest text-slate-800 flex items-center gap-2">
+                <Activity className="w-4 h-4 text-blue-600" /> My Activity
+             </h2>
+             <div className="flex bg-slate-100 p-1 rounded-xl">
+                 {['all', 'april', 'march'].map((f) => (
+                   <button
+                     key={f}
+                     onClick={() => setActiveFilter(f as any)}
+                     className={`px-4 py-2 text-[10px] font-black uppercase tracking-tighter rounded-lg transition-all ${
+                       activeFilter === f 
+                       ? "bg-white text-blue-600 shadow-sm" 
+                       : "text-slate-400 hover:text-slate-600"
+                     }`}
+                   >
+                     {f === 'all' ? 'All' : f}
+                   </button>
+                 ))}
+             </div>
           </div>
 
-          {/* Personal Stats */}
-          <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-12">
-            {[
-              { label: "My Spent this Month", value: stats.total, indicator: "+4% vs Last Mo", color: "text-[#2563EB]", showBreakdown: true },
-              { label: "Most Frequency", value: stats.topCategory, indicator: "Current Peak", color: "text-[#F97316]" },
-              { label: "My Transaction Ledger", value: stats.transactions, indicator: "Synced", color: "text-emerald-600" },
-              { label: "Account Health", value: "Excellent", indicator: "Secure", color: "text-slate-800" },
-            ].map((stat, i) => (
-              <div key={i} className="bg-white p-6 rounded-[20px] border border-[#E5E7EB] shadow-sm hover:border-[#2563EB]/40 transition-all flex flex-col justify-between group">
-                <div>
-                  <p className="text-[10px] font-black uppercase tracking-[0.1em] text-slate-400 mb-2">{stat.label}</p>
-                  <div className="flex items-baseline gap-3">
-                    <h3 className={`text-2xl font-unbounded font-black tracking-tighter ${stat.color}`}>{stat.value}</h3>
-                  </div>
-                </div>
-                
-                {stat.showBreakdown ? (
-                  <div className="mt-6 flex flex-wrap gap-2.5 pt-4 border-t border-slate-100">
-                    {stats.breakdown.map(([cat, val]) => {
-                      const cfg = categoryConfig[cat] || categoryConfig.other;
+          <div className="space-y-10">
+            {isLoading ? (
+               <div className="flex flex-col items-center justify-center py-20 text-slate-200">
+                  <Loader2 className="w-10 h-10 animate-spin mb-4" />
+                  <p className="text-[11px] font-black uppercase tracking-widest">Connecting to Supabase...</p>
+               </div>
+            ) : groupedExpenses.length > 0 ? (
+              groupedExpenses.map(([date, dateExpenses]) => (
+                <div key={date}>
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest border-l-2 border-blue-600 pl-3 mb-6">
+                    {new Date(date).toLocaleDateString('en-US', { weekday: 'short', day: 'numeric', month: 'short' })}
+                  </p>
+                  <div className="space-y-4">
+                    {dateExpenses.map((item) => {
+                      const isRemoving = removingIds.has(item.id);
+                      const cfg = categoryConfig[item.category] || categoryConfig.other;
                       return (
-                        <div key={cat} className="flex items-center gap-2" title={`${cat}: ₹${val.toLocaleString()}`}>
-                          <div className={`w-2 h-2 rounded-full ${cfg.dot} shadow-sm`}></div>
-                          <span className="text-[10px] font-black text-slate-400 uppercase tracking-tighter">{cat.slice(0, 3)}</span>
+                        <div key={item.id} className={`group bg-white p-5 rounded-2xl border border-slate-50 transition-all duration-300 flex items-center gap-4 hover:border-blue-100 hover:shadow-lg hover:shadow-blue-500/5 ${isRemoving ? 'opacity-0 scale-95 translate-y-2' : ''}`}>
+                          <div className={`w-12 h-12 ${cfg.bg} rounded-xl flex items-center justify-center text-xl`}>
+                            {cfg.emoji}
+                          </div>
+                          <div className="flex-1">
+                            <p className="text-[14px] font-bold text-slate-800 leading-tight">{item.description}</p>
+                            <p className="text-[10px] text-slate-300 font-medium italic mt-0.5">"{item.raw_input}"</p>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-[15px] font-unbounded font-black text-slate-900">₹{Number(item.amount).toLocaleString()}</p>
+                            <button 
+                               onClick={() => handleDelete(item.id)}
+                               className="text-slate-200 hover:text-rose-500 p-1.5 transition-colors opacity-0 group-hover:opacity-100 mt-1"
+                            >
+                               <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
                         </div>
                       );
                     })}
                   </div>
-                ) : (
-                  <div className="mt-6 flex items-center gap-2">
-                    <div className="h-1.5 flex-1 bg-slate-50 rounded-full overflow-hidden">
-                       <div className={`h-full ${i === 1 ? 'bg-[#F97316]' : i === 2 ? 'bg-emerald-500' : 'bg-slate-200'} w-[65%]`}></div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            ))}
-          </section>
-
-          {/* Activity Ledger */}
-          <div className="grid grid-cols-1 xl:grid-cols-3 gap-8">
-            <section className="xl:col-span-2 bg-white rounded-[20px] border border-[#E5E7EB] shadow-sm overflow-hidden flex flex-col h-full min-h-[600px]">
-              <div className="px-8 py-6 border-b border-[#E5E7EB] flex flex-col sm:flex-row sm:items-center justify-between gap-6 bg-white">
-                <div className="flex items-center gap-3">
-                   <Activity className="w-5 h-5 text-[#2563EB]" />
-                   <h4 className="text-[14px] font-unbounded font-black tracking-tight text-slate-800 uppercase">My Recent Expenses</h4>
                 </div>
-                
-                {/* Month/Year Filter */}
-                <div className="flex bg-slate-100 p-1 rounded-[10px] border border-slate-200 self-start sm:self-auto">
-                   {[
-                     { id: 'all', label: 'All Time' },
-                     { id: 'april', label: 'April 2026' },
-                     { id: 'march', label: 'March 2026' }
-                   ].map((f) => (
-                     <button
-                        key={f.id}
-                        onClick={() => setActiveFilter(f.id as any)}
-                        className={`px-4 py-2 text-[10px] font-black uppercase tracking-widest rounded-[8px] transition-all ${
-                          activeFilter === f.id 
-                          ? "bg-white text-[#2563EB] shadow-sm" 
-                          : "text-slate-400 hover:text-slate-600"
-                        }`}
-                     >
-                        {f.label}
-                     </button>
-                   ))}
+              ))
+            ) : (
+                <div className="py-20 flex flex-col items-center justify-center text-center animate-fade-in bg-slate-50/50 rounded-3xl border border-dashed border-slate-200">
+                  <div className="text-5xl mb-6 grayscale opacity-40">📝</div>
+                  <h5 className="text-[13px] font-black tracking-widest text-slate-400 uppercase mb-2">No data recorded</h5>
+                  <p className="text-[12px] text-slate-300 font-medium max-w-[200px]">Submit an expense above to get started.</p>
                 </div>
-              </div>
+            )}
+          </div>
+        </section>
 
-              <div className="flex-1 overflow-x-auto relative">
-                {filteredExpenses.length > 0 ? (
-                  <table className="w-full text-left border-collapse">
-                    <thead className="bg-slate-50/50 sticky top-0 z-10">
-                      <tr className="border-b border-[#E5E7EB]">
-                        <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Details</th>
-                        <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Category</th>
-                        <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Amount</th>
-                        <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right w-16"></th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-50">
-                      {filteredExpenses.map((item) => {
-                        const cfg = categoryConfig[item.category] || categoryConfig.other;
-                        const isRemoving = removingIds.has(item.id);
-                        return (
-                          <tr key={item.id} className={`group hover:bg-slate-50/70 transition-all duration-300 ${isRemoving ? 'opacity-0 scale-95 -translate-y-4 pointer-events-none' : 'opacity-100'}`}>
-                            <td className="px-8 py-6">
-                               <p className="text-[14px] font-bold text-slate-800">{item.description}</p>
-                               <p className="text-[11px] text-slate-400 mt-1 line-clamp-1 italic opacity-60">Input: "{item.raw_input}"</p>
-                            </td>
-                            <td className="px-8 py-6">
-                               <span className={`inline-flex items-center gap-2 px-3 py-1 pr-3.5 rounded-full text-[11px] font-black uppercase tracking-tighter border ${cfg.bg} ${cfg.text} ${cfg.border}`}>
-                                 <span className="text-[14px]">{cfg.emoji}</span>
-                                 {item.category}
-                               </span>
-                            </td>
-                            <td className="px-8 py-6 text-right font-unbounded">
-                               <p className="text-[16px] font-black text-slate-900 tracking-tighter">₹{item.amount.toLocaleString()}</p>
-                            </td>
-                            <td className="px-8 py-6 text-right">
-                               <button 
-                                 onClick={() => handleDelete(item.id)}
-                                 className="p-2 text-slate-300 hover:text-rose-500 hover:bg-rose-50 rounded-lg transition-all opacity-0 group-hover:opacity-100"
-                               >
-                                 <Trash2 className="w-4 h-4" />
-                               </button>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                ) : (
-                  /* Empty State */
-                  <div className="absolute inset-0 flex flex-col items-center justify-center p-12 text-center animate-fade-in">
-                    <div className="text-6xl mb-6 grayscale h-24 w-24 bg-slate-50 rounded-full flex items-center justify-center border border-slate-100 shadow-inner">📝</div>
-                    <h5 className="text-[15px] font-unbounded font-black tracking-tight text-slate-800 uppercase mb-2">No expenses yet</h5>
-                    <p className="text-[13px] text-slate-400 font-medium max-w-[280px]">Start by typing one in the command bar above.</p>
-                  </div>
-                )}
+        {/* AI INSIGHTS SECTION */}
+        <section className="mt-20 border-t border-slate-100 pt-12 mb-20">
+           <div className="flex items-center justify-between mb-8">
+              <div>
+                <h2 className="text-[15px] font-unbounded font-black text-slate-800 flex items-center gap-2 uppercase tracking-tight">
+                  <Sparkles className="w-5 h-5 text-blue-600" /> AI Insights
+                </h2>
+                <p className="text-[11px] text-slate-400 font-medium mt-1">Deep analysis of your spending patterns</p>
               </div>
-              
-              {filteredExpenses.length > 0 && (
-                <div className="px-8 py-6 bg-slate-50/30 border-t border-[#E5E7EB] text-center mt-auto">
-                   <button className="text-[13px] font-bold text-[#2563EB] hover:text-[#1D4ED8] transition-colors flex items-center gap-2 mx-auto uppercase tracking-widest">
-                      Export Ledger Summary <ChevronRight className="w-4 h-4" />
-                   </button>
-                </div>
-              )}
-            </section>
+              <button 
+                onClick={analyzeSpending}
+                disabled={isAnalyzingInsights || expenses.length === 0}
+                className="bg-white border border-slate-200 hover:border-blue-300 text-blue-600 font-black uppercase text-[10px] tracking-widest px-6 py-3 rounded-xl transition-all shadow-sm active:scale-95 disabled:opacity-50"
+              >
+                {isAnalyzingInsights ? <Loader2 className="w-4 h-4 animate-spin mx-auto" /> : "Analyze Trends"}
+              </button>
+           </div>
 
-            {/* Side Logic */}
-            <section className="space-y-8">
-               <div className="bg-white rounded-[20px] border border-[#E5E7EB] shadow-sm p-8">
-                  <h4 className="text-[11px] font-black uppercase tracking-widest text-slate-400 mb-8">Personal Goals Progress</h4>
-                  <div className="space-y-8">
-                     {[
-                       { label: "Emergency Fund", val: "₹1.4L / 2L", prog: 70, color: "bg-[#2563EB]" },
-                       { label: "New Tech Setup", val: "₹45k / 1.2L", prog: 38, color: "bg-purple-500" },
-                       { label: "Vacation Fund", val: "₹20k / 80k", prog: 25, color: "bg-emerald-500" },
-                     ].map((m, i) => (
-                       <div key={i} className="group cursor-default">
-                          <div className="flex justify-between items-center mb-3">
-                             <p className="text-[12px] font-bold text-slate-800 tracking-tight">{m.label}</p>
-                             <p className="text-[11px] font-black text-[#2563EB] opacity-60 uppercase tracking-tighter">{m.val}</p>
+           {insights ? (
+              <div className="bg-[#2563EB] rounded-[32px] p-8 text-white shadow-2xl shadow-blue-900/20 animate-fade-in-up relative overflow-hidden">
+                 {/* Decorative background element */}
+                 <div className="absolute top-0 right-0 -translate-y-1/2 translate-x-1/4 w-64 h-64 bg-white/10 rounded-full blur-3xl pointer-events-none" />
+                 
+                 <div className="relative z-10">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                       <div className="space-y-6">
+                          <p className="text-[10px] font-black uppercase tracking-[0.3em] opacity-60">Top Observations</p>
+                          <ul className="space-y-4">
+                             {insights.insights.map((insight, idx) => (
+                               <li key={idx} className="flex gap-4 items-start">
+                                  <span className="w-6 h-6 rounded-full bg-white/20 flex items-center justify-center text-[10px] font-black shrink-0">{idx + 1}</span>
+                                  <p className="text-[14px] font-bold leading-relaxed">{insight}</p>
+                               </li>
+                             ))}
+                          </ul>
+                       </div>
+                       
+                       <div className="bg-white/10 rounded-[28px] p-6 border border-white/10 flex flex-col justify-between h-full">
+                          <div>
+                            <p className="text-[10px] font-black uppercase tracking-[0.3em] opacity-60 mb-4">Golden Saving Tip</p>
+                            <p className="text-[20px] font-unbounded font-black leading-tight tracking-tight">
+                              {insights.tip}
+                            </p>
                           </div>
-                          <div className="h-2 bg-slate-50 rounded-full overflow-hidden border border-slate-100 shadow-inner">
-                             <div className={`h-full ${m.color} transition-all duration-1000 shadow-lg`} style={{ width: `${m.prog || 0}%` }}></div>
+                          <div className="mt-8 pt-6 border-t border-white/10 flex items-center justify-between">
+                             <span className="text-[10px] font-black uppercase tracking-widest opacity-40">Powered by Gemini</span>
+                             <div className="w-8 h-8 bg-white text-blue-600 rounded-lg flex items-center justify-center font-black">AI</div>
                           </div>
                        </div>
-                     ))}
-                  </div>
-               </div>
-
-               <div className="p-8 bg-blue-50 rounded-[20px] border border-blue-100 shadow-lg shadow-blue-500/5">
-                  <div className="flex items-center gap-4 mb-4">
-                     <div className="w-10 h-10 bg-[#2563EB] rounded-full flex items-center justify-center text-white shadow-xl shadow-blue-500/20">
-                        <PiggyBank className="w-5 h-5" />
-                     </div>
-                     <div>
-                        <h5 className="text-[12px] font-black uppercase tracking-widest text-[#2563EB]">Saving Insight</h5>
-                     </div>
-                  </div>
-                  <p className="text-[13px] text-[#2563EB]/80 font-medium leading-relaxed">
-                     You spent **32% more** on food this week compared to your average. Try setting a lunch budget for next week!
-                  </p>
-                  <button className="mt-6 w-full bg-[#2563EB] text-white font-black uppercase tracking-widest text-[11px] py-3 rounded-[12px] shadow-lg shadow-blue-500/20 hover:bg-[#1D4ED8] transition-all active:scale-95">
-                     Create a Food Budget
-                  </button>
-               </div>
-            </section>
-          </div>
-        </div>
+                    </div>
+                 </div>
+              </div>
+           ) : (
+             <div className="bg-slate-50 rounded-[32px] p-12 text-center border-2 border-dashed border-slate-200">
+                <p className="text-slate-400 text-[13px] font-black uppercase tracking-widest">No analysis available</p>
+                <p className="text-slate-300 text-[12px] font-medium mt-2">Click the button above to discover patterns.</p>
+             </div>
+           )}
+        </section>
       </main>
 
       <style jsx global>{`
         .animate-fade-in-up { animation: fadeInUp 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
-        @keyframes fadeInUp { from { opacity: 0; transform: translateY(15px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes fadeInUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
         .animate-fade-in { animation: fadeIn 0.4s ease-out forwards; }
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-        .animate-spin-slow { animation: spin 3s linear infinite; }
+        .animate-spin-slow { animation: spin 4s linear infinite; }
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
       `}</style>
     </div>
